@@ -42,6 +42,8 @@
 
 -record(state, {env, certfile, socket, next = 0}).
 
+-define(ERROR_WAIT_TIMEOUT, 100).
+
 %% @equiv application:start(ex_apns)
 start() ->
   ssl:start(),
@@ -117,15 +119,13 @@ handle_call(_Request, _From, State) ->
   {reply, ok, State}.
 
 %% @hidden
-handle_cast({send, Token, Payload}, State) ->
+handle_cast({send, Token, PayloadBin}, State) ->
   TokenInt = token_to_integer(Token),
-  PayloadBin = jsx:encode(Payload),
   Packet = [<<0, 32:16, TokenInt:256,
             (iolist_size(PayloadBin)):16>> | PayloadBin],
   send(Packet, State);
-handle_cast({send, Token, Payload, Expiry}, State = #state{next = Id}) ->
+handle_cast({send, Token, PayloadBin, Expiry}, State = #state{next = Id}) ->
   TokenInt = token_to_integer(Token),
-  PayloadBin = jsx:term_to_json(Payload),
   Packet = [<<1, Id:32, Expiry:32, 32:16, TokenInt:256,
               (iolist_size(PayloadBin)):16>> | PayloadBin],
   send(Packet, State#state{next = Id + 1});
@@ -148,12 +148,16 @@ code_change(_OldVsn, State, _Extra) ->
 %% @spec connect(address(), integer(), string()) -> result()
 %%       where address() = string() | atom() | inet:ip_address()
 %%             result() = {ok, ssl:socket()} | {error, inet:posix()}
-connect(Address, Port, CertFile) ->
+connect(Address, Port, {CertFile, Password}) ->
   CaCertFile = filename:join([code:priv_dir(?MODULE), "entrust_2048_ca.cer"]),
-  SslOptions = [binary,
+  Options = [binary,
                 {active, false},
                 {certfile, CertFile},
                 {cacertfile, CaCertFile}],
+  SslOptions = if
+              (Password /= undefined) -> [{password, Password} | Options];
+              true -> Options
+  end,
   ssl:connect(Address, Port, SslOptions).
 
 %% @spec connect(State::#state{}) -> {ok, #state{}} | {stop, reason()}
@@ -184,9 +188,11 @@ send(Packet, State = #state{socket = Socket}) ->
     {error, Reason} -> {stop, Reason} end.
 
 read_error(Socket) ->
-  case ssl:recv(Socket, 6) of
+  case ssl:recv(Socket, 6, ?ERROR_WAIT_TIMEOUT) of
     {ok, <<8, Status, Identifier:32>>} when Status =/= 0 ->
       {Identifier, status_to_reason(Status)};
+    {error, timeout} ->
+      ok;
     _ -> undefined end.
 
 %% @spec name() -> atom()
